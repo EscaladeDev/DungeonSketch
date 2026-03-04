@@ -604,9 +604,22 @@ function getTemp(holder, key, w, h) {
   return ensureCanvas(holder, key, w, h)
 }
 const __tmp = {}
+let __gridCacheKey = ""
 
 function buildScreenGridCanvas(camera, dungeon, w, h, lineWidthScale = 1) {
   const gridC = getTemp(__tmp, "grid_full", w, h)
+  const gridKey = [
+    w, h,
+    Number(camera?.x || 0).toFixed(3),
+    Number(camera?.y || 0).toFixed(3),
+    Number(camera?.zoom || 1).toFixed(4),
+    Number(dungeon?.gridSize || 32),
+    Number(dungeon?.style?.gridLineWidth ?? 1),
+    Number(dungeon?.style?.gridOpacity ?? 0.06),
+    Number(lineWidthScale || 1)
+  ].join('|')
+  if (__gridCacheKey === gridKey) return gridC
+  __gridCacheKey = gridKey
   const gctx = gridC.getContext("2d")
   gctx.clearRect(0, 0, w, h)
   drawGrid(

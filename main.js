@@ -16,6 +16,46 @@ let W=0, H=0
 
 let compiledCache = null
 let compiledSig = ""
+let renderQueued = false
+let renderDirty = true
+let lastRenderCameraSig = ""
+let lastTextOverlaySig = ""
+let lineLayerCanvas = null
+let lineLayerCtx = null
+let lastLineLayerSizeKey = ""
+
+function queueRender(){
+  if (renderQueued) return
+  renderQueued = true
+  requestAnimationFrame(loop)
+}
+function markRenderDirty(){
+  renderDirty = true
+  queueRender()
+}
+function markCompiledDirty(){
+  compiledSig = ""
+  compiledCache = null
+  markRenderDirty()
+}
+function activeInteractionInProgress(){
+  return !!(
+    panDrag || gesture || draftRect || freeDraw || lineDraw || draft || draftShape || draftArc ||
+    shapeDrag || propTransformDrag || textDrag || eraseStroke || (pointers && pointers.size > 0)
+  )
+}
+function currentCameraSignature(){
+  return [W,H,Number(camera.x||0).toFixed(3),Number(camera.y||0).toFixed(3),Number(camera.zoom||1).toFixed(4)].join('|')
+}
+function maybeUpdateTextEditorOverlay(){
+  if (!textEditorState) return
+  const tt = getSelectedText()
+  if (!tt) return
+  const sig = [textEditorState.id, Number(tt.x||0).toFixed(2), Number(tt.y||0).toFixed(2), Number(tt.fontSize||20), String(tt.fontFamily||''), currentCameraSignature()].join('|')
+  if (sig === lastTextOverlaySig) return
+  lastTextOverlaySig = sig
+  positionTextEditorOverlayForText(tt)
+}
 
 function ensureCompileVersions(){
   if (!dungeon.__versions || typeof dungeon.__versions !== "object") dungeon.__versions = { interior: 1, water: 1, lines: 1 }
@@ -23,9 +63,9 @@ function ensureCompileVersions(){
   if (!Number.isFinite(Number(dungeon.__versions.water))) dungeon.__versions.water = 1
   if (!Number.isFinite(Number(dungeon.__versions.lines))) dungeon.__versions.lines = 1
 }
-function bumpInteriorVersion(){ ensureCompileVersions(); dungeon.__versions.interior += 1 }
-function bumpWaterVersion(){ ensureCompileVersions(); dungeon.__versions.water += 1 }
-function bumpLineVersion(){ ensureCompileVersions(); dungeon.__versions.lines += 1 }
+function bumpInteriorVersion(){ ensureCompileVersions(); dungeon.__versions.interior += 1; markRenderDirty() }
+function bumpWaterVersion(){ ensureCompileVersions(); dungeon.__versions.water += 1; markRenderDirty() }
+function bumpLineVersion(){ ensureCompileVersions(); dungeon.__versions.lines += 1; markRenderDirty() }
 ensureCompileVersions()
 
 // Global edit ordering across ALL tool types (rectangle/path/free/polygon).
@@ -64,6 +104,7 @@ function resetTransientDrafts(){
   draftArc = null
   shapeDrag = null
   eraseStroke = null
+  markRenderDirty()
 }
 function clearPropSelection(){
   selectedPropId = null
@@ -82,16 +123,21 @@ function syncToolUI(){
   })
   const showCorridorWidth = ["path","free","arc"].includes(tool)
   const showPathShapeControls = ["path","free","arc"].includes(tool)
-  const showPolySides = tool === "poly"
+  const showPathClosedPolygon = tool === "path"
+  const polyFreehand = !!dungeon.style?.polyFreehand
+  const showPolyControls = tool === "poly"
+  const showPolySides = showPolyControls && !polyFreehand
   const showLineOptions = tool === "line"
-  const showToolOptions = showCorridorWidth || showPolySides || showLineOptions || showPathShapeControls
+  const showToolOptions = showCorridorWidth || showPolyControls || showLineOptions || showPathShapeControls || showPathClosedPolygon
   const corridorToolRow = document.getElementById("corridorToolRow")
+  const polyModeRow = document.getElementById("polyModeRow")
   const polyToolRow = document.getElementById("polyToolRow")
   const lineToolRow = document.getElementById("lineToolRow")
   const pathShapeRow = document.getElementById("pathShapeRow")
   const pathSmoothnessRow = document.getElementById("pathSmoothnessRow")
   const pathAmplitudeRow = document.getElementById("pathAmplitudeRow")
   const pathFrequencyRow = document.getElementById("pathFrequencyRow")
+  const pathClosedPolygonRow = document.getElementById("pathClosedPolygonRow")
   if (polyToolOptions) {
     polyToolOptions.classList.toggle("hidden", !showToolOptions)
     polyToolOptions.hidden = !showToolOptions
@@ -99,6 +145,10 @@ function syncToolUI(){
   if (corridorToolRow) {
     corridorToolRow.classList.toggle("hidden", !showCorridorWidth)
     corridorToolRow.hidden = !showCorridorWidth
+  }
+  if (polyModeRow) {
+    polyModeRow.classList.toggle("hidden", tool !== "poly")
+    polyModeRow.hidden = tool !== "poly"
   }
   if (polyToolRow) {
     polyToolRow.classList.toggle("hidden", !showPolySides)
@@ -128,6 +178,10 @@ function syncToolUI(){
     pathFrequencyRow.classList.toggle("hidden", !show)
     pathFrequencyRow.hidden = !show
   }
+  if (pathClosedPolygonRow) {
+    pathClosedPolygonRow.classList.toggle("hidden", !showPathClosedPolygon)
+    pathClosedPolygonRow.hidden = !showPathClosedPolygon
+  }
 }
 function setTool(t){
   if (t === "erase") {
@@ -149,8 +203,9 @@ function setTool(t){
   }
   tool = t
   syncToolUI()
+  markRenderDirty()
 }
-function syncUnderUI(){ if (btnUnder) btnUnder.classList.toggle("primary", !!underMode); syncToolUI() }
+function syncUnderUI(){ if (btnUnder) btnUnder.classList.toggle("primary", !!underMode); syncToolUI(); markRenderDirty() }
 toolButtons.forEach(b => b.addEventListener("click", () => { selectedShapeId=null; selectedPropId=null; selectedTextId=null; syncTextPanelVisibility(); setTool(b.dataset.tool) }))
 if (tool === "erase") tool = "space"
 
@@ -331,12 +386,14 @@ const pathAmplitude = document.getElementById("pathAmplitude")
 const pathAmplitudeOut = document.getElementById("pathAmplitudeOut")
 const pathFrequency = document.getElementById("pathFrequency")
 const pathFrequencyOut = document.getElementById("pathFrequencyOut")
+const pathClosedPolygon = document.getElementById("pathClosedPolygon")
 const wallWidth = document.getElementById("wallWidth")
 const wallColor = document.getElementById("wallColor")
 const floorColor = document.getElementById("floorColor")
 const backgroundColor = document.getElementById("backgroundColor")
 const transparentBg = document.getElementById("transparentBg")
 const polyToolOptions = document.getElementById("polyToolOptions")
+const polyFreehand = document.getElementById("polyFreehand")
 const polySides = document.getElementById("polySides")
 const polySidesOut = document.getElementById("polySidesOut")
 const lineDashed = document.getElementById("lineDashed")
@@ -436,6 +493,18 @@ function ensureGlobalPropShadowToggleUi(){
 
 const PATCH_NOTES = [
   {
+    version: "v0.16",
+    date: "March 3, 2026",
+    groups: [
+      { title: "Added", items: [
+        "New polygon option: Point-by-point."
+      ] },
+      { title: "Fixed", items: [
+        "Performance improvements."
+      ] },
+    ]
+  },
+  {
     version: "v0.15",
     date: "February 27, 2026",
     groups: [
@@ -460,19 +529,6 @@ const PATCH_NOTES = [
       { title: "Fixed", items: [
         "Sewer grate default shadow behavior and related shadow preset regressions.",
         "PDF export handling for square print sizing below 1 inch."
-      ] }
-    ]
-  },
-  {
-    version: "v0.13",
-    date: "February 25, 2026",
-    groups: [
-      { title: "Added", items: [
-        "Advanced shadow controls for props with manifest-driven defaults.",
-        "Added water, including ripple and edge behavior tuning."
-      ] },
-      { title: "Fixed", items: [
-        "Performance-sensitive visual systems continue to be tuned conservatively to reduce editor latency."
       ] }
     ]
   }
@@ -558,6 +614,7 @@ function updateShadowFromPuck(e){
   dungeon.style.shadow.dir = dir
   dungeon.style.shadow.length = lenPx
   drawPuck()
+  markCompiledDirty()
 }
 puck.addEventListener("pointerdown", (e)=>{ puck.setPointerCapture(e.pointerId); updateShadowFromPuck(e) })
 puck.addEventListener("pointermove", (e)=>{ if (e.buttons) updateShadowFromPuck(e) })
@@ -581,6 +638,8 @@ function syncUI(){
   if (pathAmplitudeOut) pathAmplitudeOut.textContent = pathDefaults.amplitude.toFixed(2)
   if (pathFrequency) pathFrequency.value = String(pathDefaults.frequency)
   if (pathFrequencyOut) pathFrequencyOut.textContent = pathDefaults.frequency.toFixed(2)
+  if (pathClosedPolygon) pathClosedPolygon.checked = !!dungeon.style.pathClosedPolygon
+  if (polyFreehand) polyFreehand.checked = !!dungeon.style.polyFreehand
   wallWidth.value = dungeon.style.wallWidth
   if (wallColor) wallColor.value = dungeon.style.wallColor || "#1f2933"
   if (floorColor) floorColor.value = dungeon.style.floorColor || dungeon.style.paper || "#ffffff"
@@ -663,6 +722,21 @@ document.addEventListener("keydown", (e) => {
 })
 showCoverPage()
 
+const compileDirtyControlIds = new Set(["wallWidth","wallColor","shadowOn","shadowOpacity","shadowColor","hatchOn","hatchDensity","hatchOpacity","hatchColor","hatchDepth","waterEnabled","waterColor","waterOpacity","waterWidth","waterOutlineEnabled","waterRipplesEnabled","waterCellSize","waterSeamBright","waterCenterGlow","waterDepthStrength"])
+const renderDirtyControlIds = new Set(["gridSize","corridorWidth","pathShapeMode","pathSmoothness","pathAmplitude","pathFrequency","pathClosedPolygon","polyFreehand","backgroundColor","transparentBg","snapDiv","gridLineWidth","gridOpacity","snapStrength","lineDashed","showTextPreview","showTextExport","floorColor","polySides","textContentInput","textFontFamily","textFontSize","textColorInput"])
+document.addEventListener("input", (e) => {
+  const id = e.target && e.target.id
+  if (!id) return
+  if (compileDirtyControlIds.has(id)) markCompiledDirty()
+  else if (renderDirtyControlIds.has(id)) markRenderDirty()
+}, true)
+document.addEventListener("change", (e) => {
+  const id = e.target && e.target.id
+  if (!id) return
+  if (compileDirtyControlIds.has(id)) markCompiledDirty()
+  else if (renderDirtyControlIds.has(id)) markRenderDirty()
+}, true)
+
 gridSize.addEventListener("input", () => dungeon.gridSize = Number(gridSize.value))
 corridorWidth.addEventListener("input", () => { dungeon.style.corridorWidth = Number(corridorWidth.value); if (corridorWidthOut) corridorWidthOut.textContent = String(dungeon.style.corridorWidth) })
 if (pathShapeMode) pathShapeMode.addEventListener("change", () => {
@@ -683,6 +757,15 @@ if (pathAmplitude) pathAmplitude.addEventListener("input", () => {
 if (pathFrequency) pathFrequency.addEventListener("input", () => {
   dungeon.style.pathJaggedFrequency = Math.max(0.35, Math.min(2.8, Number(pathFrequency.value) || 1))
   if (pathFrequencyOut) pathFrequencyOut.textContent = Number(dungeon.style.pathJaggedFrequency).toFixed(2)
+  markRenderDirty()
+})
+if (pathClosedPolygon) pathClosedPolygon.addEventListener("change", () => { dungeon.style.pathClosedPolygon = !!pathClosedPolygon.checked; markRenderDirty() })
+if (polyFreehand) polyFreehand.addEventListener("change", () => {
+  dungeon.style.polyFreehand = !!polyFreehand.checked
+  draftShape = null
+  if (draft && draft.type === "polyPoints") draft = null
+  markRenderDirty()
+  syncToolUI()
 })
 wallWidth.addEventListener("input", () => dungeon.style.wallWidth = Number(wallWidth.value))
 if (wallColor) wallColor.addEventListener("input", () => dungeon.style.wallColor = wallColor.value)
@@ -724,7 +807,11 @@ if (polySides) {
     if (polySidesOut) polySidesOut.textContent = String(s)
     if (selectedShapeId){
       const sh = dungeon.shapes.find(v => v.id === selectedShapeId)
-      if (sh && sh.kind === "regular") sh.sides = s
+      if (sh && sh.kind === "regular") {
+        sh.sides = s
+        updateShapePoly(sh)
+        markCompiledDirty()
+      }
     }
   })
 }
@@ -754,10 +841,10 @@ if (waterCenterGlow) waterCenterGlow.addEventListener("input", () => { dungeon.s
 if (waterDepthStrength) waterDepthStrength.addEventListener("input", () => { dungeon.style.water.depthStrength = Number(waterDepthStrength.value); compiledSig = "" })
 if (lineDashed) lineDashed.addEventListener("change", () => { if (!dungeon.style.lines || typeof dungeon.style.lines !== "object") dungeon.style.lines = {}; dungeon.style.lines.dashed = !!lineDashed.checked })
 
-if (textContentInput) textContentInput.addEventListener('input', () => { const t = getSelectedText(); if (t) { t.text = textContentInput.value; if (textEditorState && textEditorState.id === t.id && textCanvasEditor && document.activeElement !== textCanvasEditor) textCanvasEditor.value = t.text; if (textEditorState && textEditorState.id === t.id) positionTextEditorOverlayForText(t) } })
-if (textFontFamily) textFontFamily.addEventListener('change', async () => { const t = getSelectedText(); if (!t) return; const nextFont = textFontFamily.value; if (!hasFontOption(nextFont) && nextFont) { await loadGoogleFontFamily(nextFont) } t.fontFamily = nextFont; if (googleFontFamilyInput && !['Minecraft Five','system-ui','serif','monospace'].includes(nextFont)) googleFontFamilyInput.value = nextFont; if (textEditorState && textEditorState.id === t.id) positionTextEditorOverlayForText(t) })
-if (textFontSize) textFontSize.addEventListener('input', () => { const t = getSelectedText(); const v = Math.max(8, Math.min(144, Math.round(Number(textFontSize.value)||20))); if (t) { t.fontSize = v; if (textEditorState && textEditorState.id === t.id) positionTextEditorOverlayForText(t) } if (textFontSizeOut) textFontSizeOut.textContent = String(v) })
-if (textColorInput) textColorInput.addEventListener('input', () => { const t = getSelectedText(); if (!t) return; t.color = textColorInput.value || '#1f2933'; if (textCanvasEditor && textEditorState && textEditorState.id === t.id) textCanvasEditor.style.color = t.color })
+if (textContentInput) textContentInput.addEventListener('input', () => { const t = getSelectedText(); if (t) { t.text = textContentInput.value; if (textEditorState && textEditorState.id === t.id && textCanvasEditor && document.activeElement !== textCanvasEditor) textCanvasEditor.value = t.text; if (textEditorState && textEditorState.id === t.id) { lastTextOverlaySig = ""; positionTextEditorOverlayForText(t) } markRenderDirty() } })
+if (textFontFamily) textFontFamily.addEventListener('change', async () => { const t = getSelectedText(); if (!t) return; const nextFont = textFontFamily.value; if (!hasFontOption(nextFont) && nextFont) { await loadGoogleFontFamily(nextFont) } t.fontFamily = nextFont; if (googleFontFamilyInput && !['Minecraft Five','system-ui','serif','monospace'].includes(nextFont)) googleFontFamilyInput.value = nextFont; if (textEditorState && textEditorState.id === t.id) { lastTextOverlaySig = ""; positionTextEditorOverlayForText(t) } markRenderDirty() })
+if (textFontSize) textFontSize.addEventListener('input', () => { const t = getSelectedText(); const v = Math.max(8, Math.min(144, Math.round(Number(textFontSize.value)||20))); if (t) { t.fontSize = v; if (textEditorState && textEditorState.id === t.id) { lastTextOverlaySig = ""; positionTextEditorOverlayForText(t) } markRenderDirty() } if (textFontSizeOut) textFontSizeOut.textContent = String(v) })
+if (textColorInput) textColorInput.addEventListener('input', () => { const t = getSelectedText(); if (!t) return; t.color = textColorInput.value || '#1f2933'; if (textCanvasEditor && textEditorState && textEditorState.id === t.id) textCanvasEditor.style.color = t.color; markRenderDirty() })
 if (btnLoadGoogleFont) btnLoadGoogleFont.addEventListener('click', async () => { const family = (googleFontFamilyInput && googleFontFamilyInput.value) || ''; if (!normalizeGoogleFontFamilyName(family)) return; if (!textEditorState) pushUndo(); await applyGoogleFontToSelectedText(family) })
 if (googleFontFamilyInput) googleFontFamilyInput.addEventListener('keydown', async (e) => { if (e.key !== 'Enter') return; e.preventDefault(); const family = googleFontFamilyInput.value || ''; if (!normalizeGoogleFontFamilyName(family)) return; if (!textEditorState) pushUndo(); await applyGoogleFontToSelectedText(family) })
 if (googleFontFamilyInput) googleFontFamilyInput.addEventListener('change', async () => { const family = normalizeGoogleFontFamilyName(googleFontFamilyInput.value); if (!family || !getSelectedText()) return; await applyGoogleFontToSelectedText(family) })
@@ -769,7 +856,9 @@ if (textCanvasEditor) {
     if (!t) return
     t.text = textCanvasEditor.value
     if (textContentInput && document.activeElement !== textContentInput) textContentInput.value = textCanvasEditor.value
+    lastTextOverlaySig = ""
     positionTextEditorOverlayForText(t)
+    markRenderDirty()
   })
   textCanvasEditor.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitActiveTextEditor() }
@@ -798,6 +887,8 @@ function restore(s){
   underMode = false
   syncUI()
   syncPanelTabs()
+  lastTextOverlaySig = ""
+  markCompiledDirty()
 }
 
 function safeNum(v, fallback=0){ const n = Number(v); return Number.isFinite(n) ? n : fallback }
@@ -1091,7 +1182,9 @@ function openTextEditorFor(textId, opts={}){
   textCanvasEditor.value = String(t.text || '')
   if (t.fontFamily && !['Minecraft Five','system-ui','serif','monospace'].includes(t.fontFamily)) { loadGoogleFontFamily(t.fontFamily) }
   textCanvasEditor.dataset.textId = t.id
+  lastTextOverlaySig = ""
   positionTextEditorOverlayForText(t)
+  markRenderDirty()
   queueMicrotask(() => { try { textCanvasEditor.focus(); textCanvasEditor.select() } catch (_) {} })
   requestAnimationFrame(() => { try { textCanvasEditor.focus(); textCanvasEditor.select() } catch (_) {} })
   setTimeout(() => { try { textCanvasEditor.focus(); textCanvasEditor.select() } catch (_) {} }, 0)
@@ -1099,11 +1192,13 @@ function openTextEditorFor(textId, opts={}){
   return true
 }
 function closeTextEditorOverlay(){
-  if (!textEditOverlay || !textCanvasEditor) { textEditorState = null; return }
+  if (!textEditOverlay || !textCanvasEditor) { textEditorState = null; markRenderDirty(); return }
   textEditOverlay.classList.add('hidden')
   textEditOverlay.setAttribute('aria-hidden', 'true')
   textCanvasEditor.dataset.textId = ''
   textEditorState = null
+  lastTextOverlaySig = ""
+  markRenderDirty()
 }
 function refocusTextCanvasEditorSoon(){
   if (!textCanvasEditor) return
@@ -1117,6 +1212,7 @@ function commitActiveTextEditor(){
   const raw = String(textCanvasEditor.value || '')
   t.text = raw.trim() || 'Label'
   syncSelectedTextControls()
+  markRenderDirty()
   closeTextEditorOverlay()
   return true
 }
@@ -1132,6 +1228,7 @@ function cancelActiveTextEditor(){
     } else {
       t.text = st.originalText
     }
+    markRenderDirty()
   }
   syncTextPanelVisibility()
   closeTextEditorOverlay()
@@ -2879,6 +2976,8 @@ async function loadMapFromFile(file){
   pushUndo()
   applyLoadedMapObject(obj)
   updateHistoryButtons()
+  lastTextOverlaySig = ""
+  markCompiledDirty()
 }
 
 function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>200) undoStack.shift(); redoStack.length=0; updateHistoryButtons() }
@@ -3232,19 +3331,22 @@ async function exportPNG(){
 }
 
 function compileSignature(){
-  // committed geometry + style knobs that affect compiled caches only
+  ensureCompileVersions()
   return JSON.stringify({
-    spaces: dungeon.spaces,
-    paths: dungeon.paths,
-    shapes: dungeon.shapes.map(s => ({...s, _poly: undefined})),
-    water: dungeon.water,
+    interiorVersion: dungeon.__versions.interior,
+    waterVersion: dungeon.__versions.water,
+    lineVersion: dungeon.__versions.lines,
     style: {
       wallColor: dungeon.style.wallColor,
       wallWidth: dungeon.style.wallWidth,
       shadow: dungeon.style.shadow,
       hatch: dungeon.style.hatch,
       water: dungeon.style.water,
-    }
+      floorColor: dungeon.style.floorColor,
+      gridLineWidth: dungeon.style.gridLineWidth,
+      gridOpacity: dungeon.style.gridOpacity,
+    },
+    propsVersion: Array.isArray(placedProps) ? placedProps.map(p => [p?.id,p?.x,p?.y,p?.rot,p?.scale,p?.flipX,p?.flipY,p?.shadowDisabled].join(',')).join(';') : ''
   })
 }
 
@@ -3962,13 +4064,20 @@ let eraseStroke = null     // {cells: Map<key,{gx,gy}>}
 normalizeEditSequences()
 
 function finishTool(){
-  if (tool === "path" || tool === "poly") {
+  if (tool === "path") {
     if (draft && draft.type === "path" && draft.points.length>=2) {
-      commitDraftPath(draft.points, currentPathShapeSettings())
+      if (pathClosedPolygonEnabled()) commitClosedDraftPolygon(draft.points, currentDrawMode())
+      else commitDraftPath(draft.points, currentPathShapeSettings())
       draft = null
+      markRenderDirty()
     }
+    return
   }
-  // poly tool doesn't need finish (created on drag), but keep for symmetry
+  if (tool === "poly" && draft && draft.type === "polyPoints" && draft.points.length >= 3) {
+    commitClosedDraftPolygon(draft.points, currentDrawMode())
+    draft = null
+    markRenderDirty()
+  }
 }
 
 function normalizeAngle(angle){
@@ -4036,6 +4145,59 @@ function subGrid(){ return dungeon.gridSize / (dungeon.subSnapDiv || 4) }
 function currentDrawMode(){ return underMode ? "subtract" : "add" }
 function currentCorridorWidth(){ return Math.max(12, Number(dungeon.style?.corridorWidth || 48) || 48) }
 function currentPathShapeSettings(){ return getDefaultPathShapeSettings(dungeon.style || {}) }
+function pathClosedPolygonEnabled(){ return tool === "path" && !!dungeon.style?.pathClosedPolygon }
+function polyPointModeEnabled(){ return tool === "poly" && !!dungeon.style?.polyFreehand }
+function sanitizePolygonPoints(points){
+  if (!Array.isArray(points)) return []
+  const out = []
+  for (const p of points){
+    const x = Number(p?.x), y = Number(p?.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    const prev = out[out.length - 1]
+    if (prev && Math.abs(prev.x - x) < 1e-6 && Math.abs(prev.y - y) < 1e-6) continue
+    out.push({ x, y })
+  }
+  if (out.length >= 2){
+    const first = out[0], last = out[out.length - 1]
+    if (Math.abs(first.x - last.x) < 1e-6 && Math.abs(first.y - last.y) < 1e-6) out.pop()
+  }
+  return out
+}
+function signedPolygonArea(points){
+  if (!Array.isArray(points) || points.length < 3) return 0
+  let sum = 0
+  for (let i=0;i<points.length;i++){
+    const a = points[i], b = points[(i+1) % points.length]
+    sum += (Number(a.x)||0) * (Number(b.y)||0) - (Number(b.x)||0) * (Number(a.y)||0)
+  }
+  return sum * 0.5
+}
+function currentDraftPolylinePoints(){
+  if (draft && (draft.type === "path" || draft.type === "polyPoints") && Array.isArray(draft.points)) return draft.points
+  return null
+}
+function draftPolylinePreviewPoints(){
+  const pts = currentDraftPolylinePoints()
+  if (!pts || !pts.length) return []
+  const out = pts.slice()
+  if (draft && draft.type === "polyPoints") {
+    const hover = camera.screenToWorld(lastCursorScreen)
+    const snapped = snapSoft(hover, subGrid(), dungeon.style.snapStrength)
+    const last = out[out.length - 1]
+    if (!last || dist(last, snapped) >= Math.max(2, subGrid() * 0.2)) out.push(snapped)
+  }
+  return out
+}
+function commitClosedDraftPolygon(points, mode=currentDrawMode()){
+  const poly = sanitizePolygonPoints(points)
+  if (poly.length < 3) return false
+  const minArea = Math.max(1, subGrid() * subGrid() * 0.35)
+  if (Math.abs(signedPolygonArea(poly)) < minArea) return false
+  pushUndo()
+  const changed = commitSpacePolygon(poly, mode)
+  if (!changed) undoStack.pop()
+  return changed
+}
 function currentLineBaseWorldWidth(){
   const fallbackRipplePx = Math.max(1, Number(dungeon.style?.water?.ripplePx || 7) || 7)
   const fallbackPpu = Math.max(1, Number(compiledCache?.ppu || 4) || 4)
@@ -4086,10 +4248,15 @@ function drawLinesTo(targetCtx, cam){
   const liveCanvasCtx = targetCtx === ctx
   const logicalW = liveCanvasCtx ? Math.max(1, W|0) : Math.max(1, targetCtx.canvas.width|0)
   const logicalH = liveCanvasCtx ? Math.max(1, H|0) : Math.max(1, targetCtx.canvas.height|0)
-  const layer = document.createElement("canvas")
-  layer.width = logicalW
-  layer.height = logicalH
-  const lctx = layer.getContext("2d", { alpha:true })
+  const sizeKey = `${logicalW}x${logicalH}`
+  if (!lineLayerCanvas || sizeKey !== lastLineLayerSizeKey){
+    lineLayerCanvas = document.createElement("canvas")
+    lineLayerCanvas.width = logicalW
+    lineLayerCanvas.height = logicalH
+    lineLayerCtx = lineLayerCanvas.getContext("2d", { alpha:true })
+    lastLineLayerSizeKey = sizeKey
+  }
+  const lctx = lineLayerCtx
   lctx.clearRect(0,0,logicalW,logicalH)
   lctx.lineCap = "round"
   lctx.lineJoin = "round"
@@ -4105,8 +4272,8 @@ function drawLinesTo(targetCtx, cam){
     lctx.stroke()
     lctx.restore()
   }
-  if (liveCanvasCtx) targetCtx.drawImage(layer, 0, 0, logicalW, logicalH)
-  else targetCtx.drawImage(layer, 0, 0)
+  if (liveCanvasCtx) targetCtx.drawImage(lineLayerCanvas, 0, 0, logicalW, logicalH)
+  else targetCtx.drawImage(lineLayerCanvas, 0, 0)
 }
 function commitDraftPath(points, extra = {}){
   if (!Array.isArray(points) || points.length < 2) return false
@@ -4173,6 +4340,7 @@ function commitSpacePolygon(poly, mode=currentDrawMode()){
     return true
   }
   dungeon.spaces.push({ id: crypto.randomUUID(), seq: nextEditSeq(), mode, polygon: poly })
+  bumpInteriorVersion()
   return true
 }
 
@@ -4349,7 +4517,9 @@ window.addEventListener("pointermove", (e)=>{
   if (tool === "arc" && draftArc && draftArc.stage === "end") {
     const hoverWorld = camera.screenToWorld(lastCursorScreen)
     updateDraftArcSweepToWorld(draftArc, hoverWorld)
+    markRenderDirty()
   }
+  if (tool === "poly" && draft && draft.type === "polyPoints") markRenderDirty()
 })
 
 let propContextMenuEl = null
@@ -4518,6 +4688,7 @@ canvas.addEventListener("wheel", (e)=>{
     camera.x -= e.deltaX / camera.zoom
     camera.y -= e.deltaY / camera.zoom
   }
+  markRenderDirty()
 },{passive:false})
 
 window.addEventListener("keydown", (e)=>{
@@ -4563,6 +4734,7 @@ window.addEventListener("keydown", (e)=>{
       pushUndo()
       placedProps.splice(idx, 1)
       selectedPropId = null
+      markCompiledDirty()
       return
     }
   }
@@ -4574,6 +4746,7 @@ window.addEventListener("keydown", (e)=>{
       placedTexts.splice(idx, 1)
       selectedTextId = null
       syncTextPanelVisibility()
+      markRenderDirty()
       return
     }
   }
@@ -4626,6 +4799,7 @@ function hitHandle(worldPt, sh){
 
 // Input
 canvas.addEventListener("pointerdown", (e)=>{
+  markRenderDirty()
   canvas.setPointerCapture(e.pointerId)
   pointers.set(e.pointerId, getPointerPos(e))
   if (e.button !== 2) hidePropContextMenu()
@@ -4707,6 +4881,7 @@ canvas.addEventListener("pointerdown", (e)=>{
     const t = createTextAtWorld(world)
     syncTextPanelVisibility()
     openTextEditorFor(t.id, { isNew:true, undoPushed:true })
+    markRenderDirty()
     return
   }
 
@@ -4718,10 +4893,14 @@ canvas.addEventListener("pointerdown", (e)=>{
     if (found){
       selectedShapeId = found.id
       if (hitHandle(world, found)){
-        shapeDrag = { mode:"handle", id:found.id, startWorld:world, startCenter:{...found.center}, startRadius:found.radius, startRot:found.rotation }
+        shapeDrag = { mode:"handle", id:found.id, startWorld:world, startCenter:{...found.center}, startRadius:found.radius, startRot:found.rotation, changed:false }
       } else {
-        shapeDrag = { mode:"move", id:found.id, startWorld:world, startCenter:{...found.center} }
+        shapeDrag = { mode:"move", id:found.id, startWorld:world, startCenter:{...found.center}, changed:false }
       }
+      return
+    }
+    if (polyPointModeEnabled()) {
+      selectedShapeId = null
       return
     }
     // create new on drag
@@ -4779,6 +4958,7 @@ canvas.addEventListener("pointermove", (e)=>{
     const dy = (e.clientY - panDrag.start.y)/camera.zoom
     camera.x = panDrag.cam.x + dx
     camera.y = panDrag.cam.y + dy
+    markRenderDirty()
     return
   }
   if (gesture && pointers.size===2){
@@ -4792,12 +4972,14 @@ canvas.addEventListener("pointermove", (e)=>{
       const mdy = mid.y - gesture.lastMid.y
       camera.x += mdx / camera.zoom
       camera.y += mdy / camera.zoom
+      markRenderDirty()
     }
 
     // Zoom around the CURRENT pinch midpoint so the content under the fingers stays put.
     const factor = dd / (gesture.lastDist || dd)
     if (Number.isFinite(factor) && factor > 0){
       zoomAt(mid, factor)
+      markRenderDirty()
     }
 
     gesture.lastMid = mid
@@ -4858,6 +5040,7 @@ canvas.addEventListener("pointermove", (e)=>{
       const newC = { x: shapeDrag.startCenter.x + dx, y: shapeDrag.startCenter.y + dy }
       sh.center = snapSoft(newC, subGrid(), dungeon.style.snapStrength)
       updateShapePoly(sh)
+      shapeDrag.changed = true
     } else {
       // handle drag sets radius + rotation
       const v = { x: world.x - sh.center.x, y: world.y - sh.center.y }
@@ -4868,7 +5051,9 @@ canvas.addEventListener("pointermove", (e)=>{
       const step = Math.PI/12
       sh.rotation = Math.round(ang/step)*step
       updateShapePoly(sh)
+      shapeDrag.changed = true
     }
+    markCompiledDirty()
     return
   }
 
@@ -4894,9 +5079,11 @@ canvas.addEventListener("pointermove", (e)=>{
 
   if (tool==="space" && draftRect && pointers.size===1){
     draftRect.b = world
+    markRenderDirty()
   }
   if ((tool==="free" || tool==="water") && freeDraw && pointers.size===1){
     freeDraw.push(snapSoft(world, subGrid(), dungeon.style.snapStrength))
+    markRenderDirty()
   }
   if (tool==="line" && lineDraw && pointers.size===1){
     const snapped = snapSoft(world, subGrid(), dungeon.style.snapStrength)
@@ -4908,11 +5095,13 @@ canvas.addEventListener("pointermove", (e)=>{
       if (!last || dist(snapped, last) >= Math.max(2, subGrid() * 0.2)) pts.push(snapped)
       else pts[pts.length - 1] = snapped
     }
+    markRenderDirty()
   }
 })
 
 let lastTapTime=0, lastTapPos=null
 canvas.addEventListener("pointerup", (e)=>{
+  markRenderDirty()
   const pos = getPointerPos(e)
   const wasGesture = !!gesture || pointers.size>1
   pointers.delete(e.pointerId)
@@ -4951,8 +5140,11 @@ canvas.addEventListener("pointerup", (e)=>{
   if (shapeDrag){
     pushUndo()
     const sh = dungeon.shapes.find(s => s.id === shapeDrag.id)
+    const changed = !!shapeDrag.changed
     if (sh) sh.seq = nextEditSeq()
     shapeDrag = null
+    if (changed) bumpInteriorVersion()
+    else markRenderDirty()
     return
   }
   if (tool==="poly" && draftShape){
@@ -5035,13 +5227,28 @@ canvas.addEventListener("pointerup", (e)=>{
   } else if (tool==="path"){
     if (isDoubleTap && draft && draft.type==="path"){
       if (draft.points.length>=2){
-        commitDraftPath(draft.points, currentPathShapeSettings())
+        if (pathClosedPolygonEnabled()) commitClosedDraftPolygon(draft.points, currentDrawMode())
+        else commitDraftPath(draft.points, currentPathShapeSettings())
       }
       draft=null
+      markRenderDirty()
     } else {
       if (!draft) draft = { type:"path", points:[] }
       const p = snapSoft(world, subGrid(), dungeon.style.snapStrength)
       draft.points.push(p)
+      markRenderDirty()
+    }
+  } else if (tool==="poly" && polyPointModeEnabled()){
+    const p = snapSoft(world, subGrid(), dungeon.style.snapStrength)
+    if (isDoubleTap && draft && draft.type === "polyPoints") {
+      draft.points.push(p)
+      if (draft.points.length >= 3) commitClosedDraftPolygon(draft.points, currentDrawMode())
+      draft = null
+      markRenderDirty()
+    } else {
+      if (!draft || draft.type !== "polyPoints") draft = { type:"polyPoints", points:[] }
+      draft.points.push(p)
+      markRenderDirty()
     }
   }
 
@@ -5060,6 +5267,7 @@ canvas.addEventListener("dblclick", (e)=>{
 })
 
 canvas.addEventListener("pointercancel", (e)=>{
+  markRenderDirty()
   pointers.delete(e.pointerId)
   if (pointers.size<2) gesture=null
   if (propTransformDrag && !propTransformDrag.changed && propTransformDrag.pushedUndo && propTransformDrag.origin !== "duplicate") undoStack.pop()
@@ -5086,6 +5294,9 @@ function resize(){
   ctx.setTransform(dpr,0,0,dpr,0,0)
   W = window.innerWidth; H = window.innerHeight
   maskCanvas.width = W; maskCanvas.height = H
+  lastLineLayerSizeKey = ""
+  lastTextOverlaySig = ""
+  markRenderDirty()
 }
 window.addEventListener("resize", resize)
 resize()
@@ -5143,27 +5354,51 @@ function drawDraftOverlay(){
   }
 
   // Path tool preview: dashed centerline + translucent corridor stroke (no squish)
-  if (draft && draft.type==="path" && draft.points.length>0){
+  if (draft && (draft.type==="path" || draft.type==="polyPoints") && draft.points.length>0){
     ctx.beginPath()
-    draft.points.forEach((p,i)=>{
+    const previewPts = draftPolylinePreviewPoints()
+    previewPts.forEach((p,i)=>{
       const s = camera.worldToScreen(p)
       i===0 ? ctx.moveTo(s.x,s.y) : ctx.lineTo(s.x,s.y)
     })
+    const shouldCloseDraft = (draft.type === "polyPoints") || (pathClosedPolygonEnabled() && draft.type === "path")
+    if (shouldCloseDraft && previewPts.length >= 2){
+      const first = camera.worldToScreen(previewPts[0])
+      ctx.lineTo(first.x, first.y)
+    }
     ctx.stroke()
 
-    // Show corridor width preview immediately at the first point
-    const pFirst = camera.worldToScreen(draft.points[0])
-    const r = Math.max(2, (currentCorridorWidth() * camera.zoom) * 0.5)
-    ctx.setLineDash([])
-    ctx.fillStyle = fill
-    ctx.strokeStyle = stroke
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.arc(pFirst.x, pFirst.y, r, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.stroke()
+    if (draft.type === "path") {
+      // Show corridor width preview immediately at the first point
+      const pFirst = camera.worldToScreen(draft.points[0])
+      const r = Math.max(2, (currentCorridorWidth() * camera.zoom) * 0.5)
+      ctx.setLineDash([])
+      ctx.fillStyle = fill
+      ctx.strokeStyle = stroke
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.arc(pFirst.x, pFirst.y, r, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+    }
 
-    if (draft.points.length>=2){
+    if (previewPts.length>=2){
+      if (draft.type === "polyPoints") {
+        ctx.setLineDash([])
+        ctx.fillStyle = fill
+        ctx.strokeStyle = stroke
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        previewPts.forEach((p,i)=>{
+          const s = camera.worldToScreen(p)
+          i===0 ? ctx.moveTo(s.x,s.y) : ctx.lineTo(s.x,s.y)
+        })
+        if (previewPts.length >= 3) {
+          ctx.closePath()
+          ctx.fill()
+        }
+        ctx.stroke()
+      } else {
       const previewGeom = getPathRenderGeometry(draft.points, currentPathShapeSettings(), { width: currentCorridorWidth(), seed: "draft-path", preview: true, pointBudget: 120 })
       ctx.setLineDash([])
       if (previewGeom.kind === "polygon") {
@@ -5188,6 +5423,7 @@ function drawDraftOverlay(){
           i===0 ? ctx.moveTo(s.x,s.y) : ctx.lineTo(s.x,s.y)
         })
         ctx.stroke()
+      }
       }
     }
   }
@@ -5401,10 +5637,16 @@ function drawDraftOverlay(){
 
 // render loop
 function loop(){
-  // keep shape polys up to date
-  for (const sh of dungeon.shapes) updateShapePoly(sh)
+  renderQueued = false
+  const cameraSig = currentCameraSignature()
+  const cameraChanged = cameraSig !== lastRenderCameraSig
+  const active = activeInteractionInProgress()
+  if (!renderDirty && !cameraChanged && !active) return
 
-  // scene cache compile (authoritative world-space compile, stable across pan/zoom)
+  for (const sh of dungeon.shapes){
+    if (!Array.isArray(sh?._poly) || sh._poly.length < 3) updateShapePoly(sh)
+  }
+
   ensureCompiled()
 
   ctx.clearRect(0,0,W,H)
@@ -5413,18 +5655,18 @@ function loop(){
     ctx.fillRect(0,0,W,H)
   }
   drawCompiledExteriorGrid(ctx, camera, compiledCache, dungeon, W, H)
-
   drawCompiledBase(ctx, camera, compiledCache, dungeon, W, H)
   drawLinesTo(ctx, camera)
   drawPlacedProps()
   drawTextsTo(ctx, camera, { forExport:false })
   drawPropSelection()
   drawTextSelection()
-  if (textEditorState) { const tt = getSelectedText(); if (tt) positionTextEditorOverlayForText(tt) }
-
+  maybeUpdateTextEditorOverlay()
   drawShapeSelection()
   drawDraftOverlay()
 
-  requestAnimationFrame(loop)
+  lastRenderCameraSig = cameraSig
+  renderDirty = false
+  if (activeInteractionInProgress()) queueRender()
 }
-loop()
+markRenderDirty()
