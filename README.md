@@ -9,7 +9,7 @@ It’s designed for fast iteration while planning encounters, adventures, or lev
 	•	Adjustable style/render settings (grid, wall width, colors, shadows)
 	•	Text labels with on-canvas editing
 	•	Font size / color controls
-	•	Google Fonts support for text labels
+	•	Custom prop support
 	•	Export options (PNG / PDF)
 	•	Save / load map files
 
