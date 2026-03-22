@@ -187,6 +187,10 @@
       "src": "column.svg",
       "gridW": 0.8,
       "gridH": 0.8,
+      "category": "floor",
+      "shadow": {
+        "mode": "none"
+      },
       "tags": [
         "structure",
         "columns"
