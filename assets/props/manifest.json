@@ -58,18 +58,6 @@
       ]
     },
     {
-      "id": "door-metal-span-3",
-      "name": "Metal Door 3x",
-      "src": "door-metal-span-3.svg",
-      "gridW": 3.0,
-      "gridH": 0.42,
-      "tags": [
-        "structure",
-        "doors",
-        "locked"
-      ]
-    },
-    {
       "id": "lock-keyhole",
       "name": "Lock Keyhole",
       "src": "lock-keyhole.svg",
