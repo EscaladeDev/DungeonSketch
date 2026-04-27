@@ -1,4 +1,4 @@
-# Dungeon Sketch Architecture Notes (Feature-Parity Refactor)
+# DelvSketch Architecture Notes (Feature-Parity Refactor)
 
 This refactor keeps current behavior while improving structure and reducing `main.js` responsibilities.
 

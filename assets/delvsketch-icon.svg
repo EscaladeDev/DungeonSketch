@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title>DelvSketch icon</title>
+  <rect width="512" height="512" rx="96" fill="#f8f7f4"/>
+  <path d="M104 124h304v264H104z" fill="#fff" stroke="#1f2933" stroke-width="20" stroke-linejoin="round"/>
+  <path d="M104 190h304M104 256h304M104 322h304M180 124v264M256 124v264M332 124v264" stroke="#1f2933" stroke-width="8" opacity=".16"/>
+  <path d="M154 318h68v-74h74v-68h62v142h-70v54H154z" fill="none" stroke="#1f2933" stroke-width="24" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M336 154l48-48 22 22-48 48z" fill="#6bb8ff" stroke="#1f2933" stroke-width="14" stroke-linejoin="round"/>
+</svg>

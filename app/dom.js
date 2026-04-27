@@ -4,7 +4,7 @@ function byId(doc, id){ return doc.getElementById(id) }
 
 export function getDomRefs(doc = document){
   const canvas = q(doc, "canvas")
-  if (!canvas) throw new Error("Dungeon Sketch: <canvas> element not found")
+  if (!canvas) throw new Error("DelvSketch: <canvas> element not found")
 
   const refs = {
     // core

@@ -30,4 +30,4 @@ DelvSketch is licensed under a **custom proprietary license**.
 - You may use the software to create maps (including for commercial projects).
 - You may **not** modify, redistribute, or commercially exploit the software itself without permission.
 
-See `LICENSE` for full details.
+See `LICENSE.md` for full details.

@@ -131,7 +131,15 @@ function worldBoundsFromDungeon(dungeon) {
     }
   }
   for (const sh of dungeon.shapes) for (const p of (sh._poly || [])) eat(p)
-  for (const wp of ((dungeon.water && dungeon.water.paths) || [])) for (const p of (wp.points || [])) eat(p)
+  for (const wp of ((dungeon.water && dungeon.water.paths) || [])) {
+    const pts = Array.isArray(wp?.points) ? wp.points : []
+    const width = Math.max(2, Number(wp?.width || dungeon.style?.water?.width || 52))
+    const pad = width * 0.5
+    for (const p of pts) {
+      eat({ x: p.x - pad, y: p.y - pad })
+      eat({ x: p.x + pad, y: p.y + pad })
+    }
+  }
   if (!isFinite(minx)) return null
   return { minx, miny, maxx, maxy }
 }

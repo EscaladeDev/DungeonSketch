@@ -1,0 +1,10 @@
+{
+  "name": "delvsketch",
+  "version": "0.17.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "npm run check"
+  }
+}

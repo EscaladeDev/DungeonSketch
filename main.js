@@ -833,7 +833,7 @@ if (hatchColor) hatchColor.addEventListener("input", () => dungeon.style.hatch.c
 hatchDepth.addEventListener("input", () => dungeon.style.hatch.depth = Number(hatchDepth.value))
 snapStrength.addEventListener("input", () => dungeon.style.snapStrength = Number(snapStrength.value))
 if (propSnapToggle) propSnapToggle.addEventListener("change", () => { dungeon.style.propSnapEnabled = !!propSnapToggle.checked })
-if (showTextPreview) showTextPreview.addEventListener("change", () => { dungeon.style.showTextPreview = !!showTextPreview.checked; if (!isTextPreviewGloballyVisible()) { selectedTextId = null; if (textDrag && textDrag.pushedUndo && !textDrag.changed) undoStack.pop(); textDrag = null; cancelActiveTextEditor(); syncTextPanelVisibility(); } })
+if (showTextPreview) showTextPreview.addEventListener("change", () => { dungeon.style.showTextPreview = !!showTextPreview.checked; if (!isTextPreviewGloballyVisible()) { selectedTextId = null; if (textDrag && textDrag.pushedUndo && !textDrag.changed) discardUndoSnapshot(); textDrag = null; cancelActiveTextEditor(); syncTextPanelVisibility(); } })
 if (showTextExport) showTextExport.addEventListener("change", () => { dungeon.style.showTextExport = !!showTextExport.checked })
 if (waterEnabled) waterEnabled.addEventListener("change", () => { dungeon.style.water.enabled = !!waterEnabled.checked; compiledSig = "" })
 if (waterColor) waterColor.addEventListener("input", () => { dungeon.style.water.color = waterColor.value })
@@ -1231,7 +1231,7 @@ function cancelActiveTextEditor(){
       placedTexts = placedTexts.filter(v => v && v.id !== st.id)
       bumpTextVersion()
       selectedTextId = null
-      if (st.undoPushed) undoStack.pop()
+      if (st.undoPushed) discardUndoSnapshot()
     } else {
       t.text = st.originalText
       bumpTextVersion()
@@ -2576,8 +2576,8 @@ async function getSaveMapObject(){
   const embeddedAssets = collectUsedEmbeddedAssetsFromPlacedProps(placedProps || [])
   return {
     app: "DelvSketch",
-    format: "dungeon-sketch-map",
-    version: 6,
+    format: "delvsketch-map",
+    version: 7,
     savedAt: new Date().toISOString(),
     camera: { x: camera.x, y: camera.y, zoom: camera.zoom },
     embeddedAssets,
@@ -2591,7 +2591,7 @@ async function saveMapToFile(){
   const a = document.createElement("a")
   const stamp = new Date().toISOString().replace(/[:.]/g, "-")
   a.href = URL.createObjectURL(blob)
-  a.download = `dungeon-sketch-map-${stamp}.json`
+  a.download = `delvsketch-map-${stamp}.json`
   document.body.appendChild(a)
   a.click()
   setTimeout(() => {
@@ -2643,6 +2643,7 @@ async function loadMapFromFile(file){
 function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>200) undoStack.shift(); redoStack.length=0; updateHistoryButtons() }
 function undo(){ if(!undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); updateHistoryButtons() }
 function redo(){ if(!redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); updateHistoryButtons() }
+function discardUndoSnapshot(){ if(!undoStack.length) return; undoStack.pop(); updateHistoryButtons() }
 
 btnUndo.addEventListener("click", undo)
 btnRedo.addEventListener("click", redo)
@@ -2741,6 +2742,34 @@ function getPropWorldAABB(a){
   const ex = Math.abs(c) * (w/2) + Math.abs(s) * (h/2)
   const ey = Math.abs(s) * (w/2) + Math.abs(c) * (h/2)
   return { minx: cx - ex, miny: cy - ey, maxx: cx + ex, maxy: cy + ey }
+}
+
+function getTextWorldAABB(t){
+  if (!t || t.showInExport === false) return null
+  const text = String(t.text || '')
+  if (!text) return null
+  const fontSize = Math.max(8, Math.min(144, Math.round(Number(t.fontSize) || 20)))
+  let width = text.length * fontSize * 0.65
+  let saved = false
+  try {
+    ctx.save()
+    saved = true
+    ctx.font = `${fontSize}px ${quoteCanvasFontFamily(t.fontFamily)} , system-ui`
+    width = Math.max(width, ctx.measureText(text).width || 0)
+    ctx.restore()
+    saved = false
+  } catch (_) {
+    if (saved) { try { ctx.restore() } catch {} }
+  }
+  const pad = Math.max(6, fontSize * 0.2)
+  const x = Number(t.x || 0)
+  const y = Number(t.y || 0)
+  return {
+    minx: x - pad,
+    miny: y - fontSize - pad,
+    maxx: x + width + pad,
+    maxy: y + pad
+  }
 }
 
 function unionBounds(a, b){
@@ -2975,6 +3004,18 @@ function nextPaintFrame(){
   })
 }
 
+function canvasToBlobAsync(canvas, type = 'image/png', quality){
+  return new Promise((resolve, reject) => {
+    if (!canvas || typeof canvas.toBlob !== 'function') {
+      reject(new Error('Canvas blob export is not supported in this browser.'))
+      return
+    }
+    canvas.toBlob((blob) => {
+      blob ? resolve(blob) : reject(new Error('Canvas encoding failed.'))
+    }, type, quality)
+  })
+}
+
 async function showExportProgressAndYield(title, message, progress = null, meta = ""){
   showExportProgress(title, message, progress, meta)
   await nextPaintFrame()
@@ -3000,11 +3041,18 @@ async function exportPNG(){
     out.height = plan.heightPx
     renderSceneToCanvasForBounds(out, plan.bounds)
     await updateExportProgressAndYield('Encoding PNG…', 82, `${plan.widthPx} × ${plan.heightPx} px`)
+    const blob = await canvasToBlobAsync(out, 'image/png')
+    const objectUrl = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.download = `dungeon-map-${plan.widthPx}x${plan.heightPx}.png`
-    a.href = out.toDataURL('image/png')
+    a.download = `delvsketch-map-${plan.widthPx}x${plan.heightPx}.png`
+    a.href = objectUrl
+    document.body.appendChild(a)
     await updateExportProgressAndYield('Starting download…', 100, a.download)
     a.click()
+    setTimeout(() => {
+      URL.revokeObjectURL(objectUrl)
+      a.remove()
+    }, 0)
   } finally {
     setTimeout(hideExportProgress, 120)
   }
@@ -3290,10 +3338,22 @@ function getExportWorldBounds(options = {}){
     }
   }
 
+  if (Array.isArray(dungeon.water?.paths)) {
+    for (const waterPath of dungeon.water.paths){
+      b = unionBounds(b, waterStrokeBounds(waterPath))
+    }
+  }
+
   if (Array.isArray(placedProps)){
     for (const a of placedProps){
       if (!a) continue
       b = unionBounds(b, getPropWorldAABB(a))
+    }
+  }
+
+  if (dungeon.style?.showTextExport !== false && Array.isArray(placedTexts)){
+    for (const t of placedTexts){
+      b = unionBounds(b, getTextWorldAABB(t))
     }
   }
   if (!b) return null
@@ -3480,8 +3540,39 @@ function tileHasPlacedProp(tileWorld){
   return false
 }
 
+function tileHasLineStroke(tileWorld){
+  if (!Array.isArray(dungeon.lines) || dungeon.lines.length === 0) return false
+  for (const line of dungeon.lines){
+    if (rectsIntersect(tileWorld, lineStrokeBounds(line))) return true
+  }
+  return false
+}
+
+function tileHasWaterStroke(tileWorld){
+  const paths = Array.isArray(dungeon.water?.paths) ? dungeon.water.paths : []
+  if (!paths.length) return false
+  for (const path of paths){
+    if (rectsIntersect(tileWorld, waterStrokeBounds(path))) return true
+  }
+  return false
+}
+
+function tileHasText(tileWorld){
+  if (dungeon.style?.showTextExport === false || !Array.isArray(placedTexts) || placedTexts.length === 0) return false
+  for (const t of placedTexts){
+    if (rectsIntersect(tileWorld, getTextWorldAABB(t))) return true
+  }
+  return false
+}
+
 function tileHasPrintableContent(tileWorld, cache){
-  return tileHasVisibleInterior(tileWorld, cache) || tileHasPlacedProp(tileWorld)
+  return (
+    tileHasVisibleInterior(tileWorld, cache) ||
+    tileHasPlacedProp(tileWorld) ||
+    tileHasLineStroke(tileWorld) ||
+    tileHasWaterStroke(tileWorld) ||
+    tileHasText(tileWorld)
+  )
 }
 
 function renderTileCanvasForWorld(tileWorld, pxPerSquare){
@@ -3610,11 +3701,13 @@ async function exportSinglePagePDFWithOptions(jsPDF, opts){
     compress: true
   })
   pdf.addImage(out.toDataURL('image/png'), 'PNG', xMm, yMm, targetMmW, targetMmH, undefined, 'FAST')
+  out.width = 1
+  out.height = 1
   pdf.setFontSize(9)
   pdf.setTextColor(80,80,80)
   pdf.text('Single-page export (fit to page).', marginMm, pageMm.h - Math.max(4, marginMm * 0.5))
-  await updateExportProgressAndYield('Saving PDF…', 100, 'dungeon-map-single-page.pdf')
-  pdf.save('dungeon-map-single-page.pdf')
+  await updateExportProgressAndYield('Saving PDF…', 100, 'delvsketch-map-single-page.pdf')
+  pdf.save('delvsketch-map-single-page.pdf')
 }
 
 
@@ -3684,6 +3777,8 @@ async function exportTiledScalePDFWithOptions(jsPDF, opts){
     const imgY = marginMm
 
     pdf.addImage(tileCanvas.toDataURL('image/png'), 'PNG', imgX, imgY, tileMmW, tileMmH, undefined, 'FAST')
+    tileCanvas.width = 1
+    tileCanvas.height = 1
 
     if (opts.trimMarks) drawPdfTrimMarks(pdf, pageMm, { x: imgX, y: imgY, w: tileMmW, h: tileMmH })
 
@@ -3703,8 +3798,8 @@ async function exportTiledScalePDFWithOptions(jsPDF, opts){
   }
 
   const sqLabel = String(opts.squareSizeIn).replace(/\./g, '_')
-  await updateExportProgressAndYield('Saving PDF…', 100, `dungeon-map-tiled-${sqLabel}in.pdf`)
-  pdf.save(`dungeon-map-tiled-${sqLabel}in.pdf`)
+  await updateExportProgressAndYield('Saving PDF…', 100, `delvsketch-map-tiled-${sqLabel}in.pdf`)
+  pdf.save(`delvsketch-map-tiled-${sqLabel}in.pdf`)
 }
 
 async function exportMultipagePDF(){
@@ -3738,7 +3833,7 @@ let lineDraw = null       // { points:[{x,y}...], dashed }
 let draftShape = null     // {center, radius, rotation, sides}
 let draftArc = null       // {stage, center, radius, startAngle, endAngle, sweepAccum, lastRawAngle, previewAngle, dragPointerId}
 let selectedShapeId = null
-let shapeDrag = null      // {mode:'move'|'handle', id, startWorld, startCenter, startRadius, startRot}
+let shapeDrag = null      // {mode:'move'|'handle', id, startWorld, startCenter, startRadius, startRot, pushedUndo}
 let eraseStroke = null     // {cells: Map<key,{gx,gy}>}
 normalizeEditSequences()
 
@@ -3874,7 +3969,7 @@ function commitClosedDraftPolygon(points, mode=currentDrawMode()){
   if (Math.abs(signedPolygonArea(poly)) < minArea) return false
   pushUndo()
   const changed = commitSpacePolygon(poly, mode)
-  if (!changed) undoStack.pop()
+  if (!changed) discardUndoSnapshot()
   return changed
 }
 function currentLineBaseWorldWidth(){
@@ -3902,6 +3997,21 @@ function lineStrokeBounds(line){
   }
   if (!Number.isFinite(minx) || !Number.isFinite(miny) || !Number.isFinite(maxx) || !Number.isFinite(maxy)) return null
   const pad = Math.max(1, Number(line.width || currentLineWorldWidth()) || 1) * 0.5 + subGrid() * 0.25
+  return { minx:minx-pad, miny:miny-pad, maxx:maxx+pad, maxy:maxy+pad }
+}
+function waterStrokeBounds(path){
+  if (!path || !Array.isArray(path.points) || !path.points.length) return null
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity
+  for (const pt of path.points){
+    const x = Number(pt?.x), y = Number(pt?.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    if (x < minx) minx = x
+    if (y < miny) miny = y
+    if (x > maxx) maxx = x
+    if (y > maxy) maxy = y
+  }
+  if (!Number.isFinite(minx) || !Number.isFinite(miny) || !Number.isFinite(maxx) || !Number.isFinite(maxy)) return null
+  const pad = Math.max(2, Number(path.width || dungeon.style?.water?.width || 52) || 52) * 0.5 + subGrid() * 0.5
   return { minx:minx-pad, miny:miny-pad, maxx:maxx+pad, maxy:maxy+pad }
 }
 function commitLineStroke(points, extra = {}){
@@ -4600,10 +4710,11 @@ canvas.addEventListener("pointerdown", (e)=>{
     const found = dungeon.shapes.slice().reverse().find(sh => hitHandle(world, sh) || hitShape(world, sh))
     if (found){
       selectedShapeId = found.id
+      pushUndo()
       if (hitHandle(world, found)){
-        shapeDrag = { mode:"handle", id:found.id, startWorld:world, startCenter:{...found.center}, startRadius:found.radius, startRot:found.rotation, changed:false }
+        shapeDrag = { mode:"handle", id:found.id, startWorld:world, startCenter:{...found.center}, startRadius:found.radius, startRot:found.rotation, changed:false, pushedUndo:true }
       } else {
-        shapeDrag = { mode:"move", id:found.id, startWorld:world, startCenter:{...found.center}, changed:false }
+        shapeDrag = { mode:"move", id:found.id, startWorld:world, startCenter:{...found.center}, changed:false, pushedUndo:true }
       }
       return
     }
@@ -4828,7 +4939,7 @@ canvas.addEventListener("pointerup", (e)=>{
   if (textDrag){
     const clickedId = textDrag.id
     const wasChanged = !!textDrag.changed
-    if (!wasChanged && textDrag.pushedUndo) undoStack.pop()
+    if (!wasChanged && textDrag.pushedUndo) discardUndoSnapshot()
     textDrag = null
     if (!wasChanged && (tool === "select" || tool === "text")) {
       openTextEditorFor(clickedId, { isNew:false, undoPushed:false })
@@ -4838,7 +4949,7 @@ canvas.addEventListener("pointerup", (e)=>{
 
   // end prop transform drag
   if (propTransformDrag){
-    if (!propTransformDrag.changed && propTransformDrag.pushedUndo && propTransformDrag.origin !== "duplicate") undoStack.pop()
+    if (!propTransformDrag.changed && propTransformDrag.pushedUndo && propTransformDrag.origin !== "duplicate") discardUndoSnapshot()
     propTransformDrag = null
     return
   }
@@ -4846,10 +4957,10 @@ canvas.addEventListener("pointerup", (e)=>{
 
   // end shape drag / create shape
   if (shapeDrag){
-    pushUndo()
     const sh = dungeon.shapes.find(s => s.id === shapeDrag.id)
     const changed = !!shapeDrag.changed
-    if (sh) sh.seq = nextEditSeq()
+    if (!changed && shapeDrag.pushedUndo) discardUndoSnapshot()
+    if (sh && changed) sh.seq = nextEditSeq()
     shapeDrag = null
     if (changed) bumpInteriorVersion()
     else markRenderDirty()
@@ -4906,7 +5017,7 @@ canvas.addEventListener("pointerup", (e)=>{
       ]
       pushUndo()
       const changed = commitSpacePolygon(poly, currentDrawMode())
-      if (!changed) undoStack.pop()
+      if (!changed) discardUndoSnapshot()
     }
     draftRect=null
   } else if (tool==="free"){
@@ -4978,7 +5089,7 @@ canvas.addEventListener("pointercancel", (e)=>{
   markRenderDirty()
   pointers.delete(e.pointerId)
   if (pointers.size<2) gesture=null
-  if (propTransformDrag && !propTransformDrag.changed && propTransformDrag.pushedUndo && propTransformDrag.origin !== "duplicate") undoStack.pop()
+  if (propTransformDrag && !propTransformDrag.changed && propTransformDrag.pushedUndo && propTransformDrag.origin !== "duplicate") discardUndoSnapshot()
   panDrag=null
   draftRect=null
   freeDraw=null
@@ -4986,6 +5097,7 @@ canvas.addEventListener("pointercancel", (e)=>{
   draft=null
   draftShape=null
   draftArc=null
+  if (shapeDrag && !shapeDrag.changed && shapeDrag.pushedUndo) discardUndoSnapshot()
   shapeDrag=null
   propTransformDrag=null
   textDrag=null
